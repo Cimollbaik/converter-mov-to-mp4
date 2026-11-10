@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Converter MOV ke MP4</title>
+<style>
+  :root{
+    --bg:#eef2f1; --card:#ffffff; --ink:#16231f; --muted:#5d6f69;
+    --line:#cfdad6; --accent:#0e6b5c; --accent-ink:#ffffff; --warn:#8a4b00; --err:#a3262a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:20px}
+  main{width:100%;max-width:560px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:28px}
+  h1{margin:0 0 6px;font-size:1.5rem;letter-spacing:-.01em}
+  p.sub{margin:0 0 20px;color:var(--muted);line-height:1.5}
+  #drop{border:2px dashed var(--line);border-radius:10px;padding:34px 16px;text-align:center;cursor:pointer;
+    transition:border-color .15s,background .15s}
+  #drop:hover,#drop.over,#drop:focus-visible{border-color:var(--accent);background:#f3f9f7;outline:none}
+  #drop strong{display:block;font-size:1.05rem;margin-bottom:4px}
+  #drop span{color:var(--muted);font-size:.92rem}
+  #info{margin:16px 0 0;font-size:.95rem;word-break:break-all}
+  button{font:inherit;cursor:pointer;border:0;border-radius:8px;padding:13px 18px;width:100%;margin-top:16px;
+    background:var(--accent);color:var(--accent-ink);font-weight:600}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);margin-top:10px}
+  button:focus-visible{outline:3px solid #7fc4b6;outline-offset:2px}
+  #bar{height:10px;border-radius:6px;background:var(--line);overflow:hidden;margin-top:18px;display:none}
+  #bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  #status{margin-top:12px;font-size:.95rem;line-height:1.5;min-height:1.5em}
+  #status.err{color:var(--err)} #status.warn{color:var(--warn)}
+  a#dl{display:none;margin-top:14px;text-align:center;padding:13px;border-radius:8px;background:var(--accent);
+    color:var(--accent-ink);text-decoration:none;font-weight:600}
+  footer{margin-top:20px;color:var(--muted);font-size:.85rem;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+  <h1>Converter MOV ke MP4</h1>
+  <p class="sub">Semua proses terjadi di perangkat kamu. File tidak diunggah ke mana pun.</p>
+
+  <div id="drop" tabindex="0" role="button" aria-label="Pilih file MOV">
+    <strong>Pilih atau tarik file MOV ke sini</strong>
+    <span>Ukuran 4 GB atau lebih tetap bisa (Chrome / Edge di komputer)</span>
+  </div>
+  <input id="file" type="file" accept=".mov,video/quicktime" hidden>
+
+  <div id="info"></div>
+  <button id="go" disabled>Convert ke MP4</button>
+  <button id="cancel" class="ghost" style="display:none">Batalkan</button>
+
+  <div id="bar"><i></i></div>
+  <div id="status"></div>
+  <a id="dl">Download MP4</a>
+
+  <footer>
+    Video tidak dikompres ulang jika formatnya sudah cocok, jadi cepat dan kualitasnya tetap sama.
+  </footer>
+</main>
+
+<script type="module">
+import {
+  Input, Output, Conversion, ALL_FORMATS,
+  BlobSource, Mp4OutputFormat, StreamTarget, BufferTarget
+} from 'https://cdn.jsdelivr.net/npm/mediabunny@1/+esm';
+
+const $ = id => document.getElementById(id);
+const drop = $('drop'), fileInput = $('file'), info = $('info'), go = $('go'),
+      cancelBtn = $('cancel'), bar = $('bar'), barFill = bar.querySelector('i'),
+      statusEl = $('status'), dl = $('dl');
+
+let chosen = null, running = null, blobUrl = null;
+const canStream = typeof window.showSaveFilePicker === 'function';
+
+function setStatus(msg, kind=''){ statusEl.textContent = msg; statusEl.className = kind; }
+function fmtSize(b){
+  return b >= 1073741824 ? (b/1073741824).toFixed(2)+' GB' : (b/1048576).toFixed(1)+' MB';
+}
+function pick(f){
+  if(!f) return;
+  chosen = f;
+  info.textContent = f.name + ' (' + fmtSize(f.size) + ')';
+  go.disabled = false;
+  dl.style.display = 'none';
+  bar.style.display = 'none';
+  setStatus('');
+  if(!canStream && f.size > 1.5*1073741824){
+    setStatus('Browser ini menyimpan hasil di memori, jadi file sebesar ini bisa gagal. Untuk file besar, pakai Chrome atau Edge di komputer.', 'warn');
+  }
+}
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); fileInput.click(); }});
+fileInput.addEventListener('change', () => pick(fileInput.files[0]));
+['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => pick(e.dataTransfer.files[0]));
+
+function busy(on){
+  go.disabled = on; cancelBtn.style.display = on ? 'block' : 'none';
+  drop.style.pointerEvents = on ? 'none' : '';
+}
+
+go.addEventListener('click', async () => {
+  if(!chosen) return;
+  const outName = chosen.name.replace(/\.[^.]+$/, '') + '.mp4';
+  let target, writable = null;
+
+  try {
+    // Pilih lokasi simpan dulu (harus langsung setelah klik)
+    if(canStream){
+      const handle = await window.showSaveFilePicker({
+        suggestedName: outName,
+        types: [{ description: 'Video MP4', accept: { 'video/mp4': ['.mp4'] } }]
+      });
+      writable = await handle.createWritable();
+      target = new StreamTarget(writable);
+    } else {
+      target = new BufferTarget();
+    }
+  } catch(e){
+    if(e && e.name === 'AbortError'){ setStatus('Dibatalkan.'); return; }
+    setStatus('Tidak bisa menyiapkan file hasil: ' + e.message, 'err'); return;
+  }
+
+  busy(true);
+  dl.style.display = 'none';
+  bar.style.display = 'block'; barFill.style.width = '0%';
+  setStatus('Memulai...');
+
+  try {
+    const input = new Input({ source: new BlobSource(chosen), formats: ALL_FORMATS });
+    const output = new Output({ format: new Mp4OutputFormat(), target });
+    const conversion = await Conversion.init({ input, output });
+
+    if(!conversion.isValid){
+      throw new Error('Isi video ini tidak bisa diubah ke MP4 oleh browser kamu.');
+    }
+    running = conversion;
+    conversion.onProgress = p => {
+      const pct = Math.round(p*100);
+      barFill.style.width = pct + '%';
+      setStatus('Sedang convert... ' + pct + '%');
+    };
+
+    await conversion.execute();
+    barFill.style.width = '100%';
+
+    if(writable){
+      try { await writable.close(); } catch(_) { /* sudah ditutup otomatis */ }
+      setStatus('Selesai. File MP4 sudah tersimpan di lokasi yang kamu pilih.');
+    } else {
+      const blob = new Blob([target.buffer], { type: 'video/mp4' });
+      if(blobUrl) URL.revokeObjectURL(blobUrl);
+      blobUrl = URL.createObjectURL(blob);
+      dl.href = blobUrl; dl.download = outName; dl.style.display = 'block';
+      setStatus('Selesai. Tekan Download MP4.');
+    }
+  } catch(e){
+    if(writable){ try { await writable.abort(); } catch(_) {} }
+    if(running && running._cancelled){ setStatus('Dibatalkan.'); }
+    else setStatus('Gagal: ' + (e && e.message ? e.message : e), 'err');
+  } finally {
+    running = null; busy(false); go.disabled = !chosen;
+  }
+});
+
+cancelBtn.addEventListener('click', async () => {
+  if(running){ running._cancelled = true; try { await running.cancel(); } catch(_) {} }
+});
+</script>
+</body>
+</html>
